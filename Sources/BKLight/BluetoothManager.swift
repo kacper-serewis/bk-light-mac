@@ -24,6 +24,8 @@ final class BluetoothManager: NSObject, ObservableObject {
 
     /// Fired when a link object is created, so the current picture can be queued on it.
     var onLinksChanged: (() -> Void)?
+    /// Fired when a link (re)connects and can take frames.
+    var onLinkReady: ((UUID) -> Void)?
 
     override init() {
         super.init()
@@ -70,6 +72,7 @@ final class BluetoothManager: NSObject, ObservableObject {
                 ?? central.retrievePeripherals(withIdentifiers: [id]).first else { continue }
             let link = PanelLink(peripheral: peripheral)
             link.onNeedsReconnect = { [weak self] link in self?.bounce(link) }
+            link.onReady = { [weak self] link in self?.onLinkReady?(link.id) }
             links[id] = link
             connect(link)
             created = true

@@ -45,6 +45,7 @@ final class DisplayController: ObservableObject {
     @Published private(set) var appliedBrightness = 1.0
 
     let bluetooth = BluetoothManager()
+    private lazy var sender = FrameSender(bluetooth: bluetooth)
 
     private var source: NowPlayingSource?
     private var coverCache: (key: String, image: CGImage)?
@@ -169,8 +170,6 @@ final class DisplayController: ObservableObject {
         content = next
         appliedBrightness = brightness
         preview = canvas.scaled(by: max(brightness, 0.35)).nsImage()
-        for (id, png) in Renderer.slices(canvas: canvas, panels: settings.panels, layout: settings.layout, brightness: brightness) {
-            bluetooth.link(for: id)?.submit(png: png)
-        }
+        sender.submit(Renderer.slices(canvas: canvas, panels: settings.panels, layout: settings.layout, brightness: brightness))
     }
 }
