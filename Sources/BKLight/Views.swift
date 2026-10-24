@@ -15,7 +15,14 @@ struct MainView: View {
             Form {
                 PreviewSection()
                 DisplaySection()
+                if controller.settings.mode == .auto { RulesSection() }
+                if controller.showsScreenColours { ScreenColoursSection() }
+                if controller.showsWeather { WeatherSection() }
+                AwaySection()
                 SourceSection()
+                if controller.usesHomeAssistant || controller.settings.source == .homeAssistant {
+                    HomeAssistantSection()
+                }
             }
             .formStyle(.grouped)
             .frame(minWidth: 360)
@@ -51,6 +58,9 @@ struct PreviewSection: View {
                         .foregroundStyle(.secondary).font(.caption)
                     Text(controller.sourceStatus).foregroundStyle(.secondary).font(.caption)
                         .fixedSize(horizontal: false, vertical: true)
+                    if controller.isAway {
+                        Text("Mac is locked or asleep").foregroundStyle(.secondary).font(.caption)
+                    }
                 }
             }
         }
@@ -67,21 +77,6 @@ struct DisplaySection: View {
             Picker("Mode", selection: $controller.settings.mode) {
                 ForEach(DisplayMode.allCases) { Text($0.label).tag($0) }
             }
-            if controller.settings.mode == .ambilight {
-                Picker("Screen style", selection: $controller.settings.screenStyle) {
-                    ForEach(ScreenStyle.allCases) { Text($0.label).tag($0) }
-                }
-                Text(controller.screenStatus).font(.caption).foregroundStyle(controller.screenFailed ? .red : .secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if controller.screenFailed {
-                    HStack {
-                        Button("Open Privacy Settings") {
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
-                        }
-                        Button("Retry") { controller.retryScreenCapture() }
-                    }
-                }
-            }
             Picker("Layout", selection: $controller.settings.layout) {
                 ForEach(Layout.allCases) { Text($0.label).tag($0) }
             }
@@ -92,6 +87,152 @@ struct DisplaySection: View {
             LaunchAtLoginToggle()
             Button("Identify panels") { controller.identify() }
                 .help("Shows 1–4 with a white bar on top for 8 seconds, to check placement and rotation.")
+        }
+    }
+}
+
+// MARK: Automatic rules
+
+struct RulesSection: View {
+    @EnvironmentObject var controller: DisplayController
+
+    var body: some View {
+        Section {
+            let order = controller.settings.activeOrder
+            ForEach(Array(order.enumerated()), id: \.element) { index, source in
+                HStack {
+                    Toggle(source.label, isOn: member(source, of: $controller.settings.activeEnabled))
+                    Spacer()
+                    Button { move(index, by: -1) } label: { Image(systemName: "chevron.up") }
+                        .disabled(index == 0)
+                    Button { move(index, by: 1) } label: { Image(systemName: "chevron.down") }
+                        .disabled(index == order.count - 1)
+                }
+                .buttonStyle(.borderless)
+            }
+        } header: {
+            Text("Show while active (top wins)")
+        }
+        Section {
+            ForEach(IdleScreen.allCases) { screen in
+                Toggle(screen.label, isOn: member(screen, of: $controller.settings.idleScreens))
+            }
+            if controller.settings.idleScreens.count > 1 {
+                Stepper("Switch every \(Int(controller.settings.idleRotation)) s",
+                        value: $controller.settings.idleRotation, in: 5...600, step: 5)
+            }
+        } header: {
+            Text("Otherwise, take turns")
+        }
+    }
+
+    private func move(_ index: Int, by offset: Int) {
+        controller.settings.activeOrder.swapAt(index, index + offset)
+    }
+}
+
+struct ScreenColoursSection: View {
+    @EnvironmentObject var controller: DisplayController
+
+    var body: some View {
+        Section("Screen colours") {
+            Picker("Style", selection: $controller.settings.screenStyle) {
+                ForEach(ScreenStyle.allCases) { Text($0.label).tag($0) }
+            }
+            Text(controller.screenStatus).font(.caption).foregroundStyle(controller.screenFailed ? .red : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if controller.screenFailed {
+                HStack {
+                    Button("Open Privacy Settings") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+                    }
+                    Button("Retry") { controller.retryScreenCapture() }
+                }
+            }
+        }
+    }
+}
+
+struct WeatherSection: View {
+    @EnvironmentObject var controller: DisplayController
+    @State private var query = ""
+
+    var body: some View {
+        Section("Weather") {
+            HStack {
+                TextField("Place", text: $query, prompt: Text(controller.settings.weatherPlace?.name ?? "Amsterdam"))
+                    .onSubmit(search)
+                Button("Find", action: search).disabled(query.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            Text(controller.weatherStatus).font(.caption).foregroundStyle(.secondary)
+            Text("Forecasts from Open-Meteo.com").font(.caption2).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func search() {
+        let text = query.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        Task {
+            await controller.findWeatherPlace(text)
+            query = ""
+        }
+    }
+}
+
+struct AwaySection: View {
+    @EnvironmentObject var controller: DisplayController
+
+    var body: some View {
+        Section("Away and night") {
+            Picker("When the Mac is locked or asleep", selection: $controller.settings.awayAction) {
+                ForEach(AwayAction.allCases) { Text($0.label).tag($0) }
+            }
+            Toggle("Night schedule", isOn: $controller.settings.nightEnabled)
+            if controller.settings.nightEnabled {
+                DatePicker("From", selection: time($controller.settings.nightStart), displayedComponents: .hourAndMinute)
+                DatePicker("Until", selection: time($controller.settings.nightEnd), displayedComponents: .hourAndMinute)
+                Picker("At night", selection: $controller.settings.nightAction) {
+                    ForEach(NightAction.allCases) { Text($0.label).tag($0) }
+                }
+            }
+        }
+    }
+
+    /// Minutes after midnight as a Date today, for DatePicker.
+    private func time(_ minutes: Binding<Int>) -> Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(bySettingHour: minutes.wrappedValue / 60, minute: minutes.wrappedValue % 60,
+                                      second: 0, of: Date()) ?? Date()
+            },
+            set: {
+                let parts = Calendar.current.dateComponents([.hour, .minute], from: $0)
+                minutes.wrappedValue = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+            }
+        )
+    }
+}
+
+private func member<T: Hashable>(_ value: T, of set: Binding<Set<T>>) -> Binding<Bool> {
+    Binding(
+        get: { set.wrappedValue.contains(value) },
+        set: { if $0 { set.wrappedValue.insert(value) } else { set.wrappedValue.remove(value) } }
+    )
+}
+
+struct HomeAssistantSection: View {
+    @EnvironmentObject var controller: DisplayController
+
+    var body: some View {
+        Section("Home Assistant") {
+            TextField("URL", text: $controller.settings.haBaseURL, prompt: Text("https://homeassistant.local:8123"))
+            SecureField("Long-lived token", text: $controller.haToken)
+            if controller.usesHomeAssistant {
+                Text(controller.homeAssistantStatus).font(.caption).foregroundStyle(.secondary)
+                if !controller.homeAssistantFound.isEmpty {
+                    Text(controller.homeAssistantFound).font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
     }
 }
@@ -107,8 +248,6 @@ struct SourceSection: View {
                 ForEach(MediaSource.allCases) { Text($0.label).tag($0) }
             }
             if controller.settings.source == .homeAssistant {
-                TextField("URL", text: $controller.settings.haBaseURL, prompt: Text("https://homeassistant.local:8123"))
-                SecureField("Long-lived token", text: $controller.haToken)
                 TextField("Entity", text: $controller.settings.haEntityID, prompt: Text("media_player.spotify_you"))
             }
             Stepper("Keep cover \(Int(controller.settings.idleGrace)) s after pause",

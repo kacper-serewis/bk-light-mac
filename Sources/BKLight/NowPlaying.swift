@@ -169,3 +169,145 @@ final class HomeAssistantSource: NowPlayingSource {
         return try await URLSession.shared.data(for: request).0
     }
 }
+
+/// Anything that reports "now playing" to macOS (Music, Spotify, browsers, Podcasts, …).
+/// Since macOS 15.4 only entitled processes may read MediaRemote; `/usr/bin/perl` is one, so the
+/// bundled mediaremote-adapter script loads a small library into Perl that streams JSON lines.
+@MainActor
+final class SystemMediaSource: NowPlayingSource {
+    var onChange: ((NowPlaying) -> Void)?
+    private(set) var status = "Starting…"
+    private var process: Process?
+    private var buffer = Data()
+    private var info: [String: Any] = [:]
+    private var artwork: Data?
+    private var artworkGeneration = 0
+    private var stopped = false
+    private var restartTask: Task<Void, Never>?
+    private var appNames: [String: String] = [:]
+
+    func start() {
+        stopped = false
+        launch()
+    }
+
+    func stop() {
+        stopped = true
+        restartTask?.cancel()
+        process?.terminate()
+        process = nil
+    }
+
+    func fetchArtwork() async throws -> Data? { artwork }
+
+    private func launch() {
+        guard let resources = Bundle.main.resourceURL,
+              FileManager.default.fileExists(atPath: resources.appendingPathComponent("mediaremote-adapter.pl").path) else {
+            publish(status: "MediaRemote adapter missing; build the app with scripts/build-app.sh")
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = [
+            resources.appendingPathComponent("mediaremote-adapter.pl").path,
+            resources.appendingPathComponent("MediaRemoteAdapter.framework").path,
+            "stream", "--debounce=100",
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        // DispatchQueue.main keeps the chunks in order, which Task hops don't guarantee.
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.receive(data, from: process) } }
+        }
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.terminated(process) } }
+        }
+        buffer.removeAll()
+        info = [:]
+        artwork = nil
+        do {
+            try process.run()
+            self.process = process
+            publish(status: "Nothing playing")
+        } catch {
+            publish(status: "Could not start the MediaRemote adapter: \(error.localizedDescription)")
+        }
+    }
+
+    private func terminated(_ process: Process) {
+        guard !stopped, process === self.process else { return }
+        self.process = nil
+        info = [:]
+        artwork = nil
+        publish(status: "MediaRemote adapter stopped (exit \(process.terminationStatus)); restarting…")
+        restartTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, !Task.isCancelled, !self.stopped else { return }
+            self.launch()
+        }
+    }
+
+    private func receive(_ data: Data, from process: Process) {
+        guard process === self.process else { return }
+        buffer.append(data)
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let line = buffer[buffer.startIndex..<newline]
+            buffer.removeSubrange(buffer.startIndex...newline)
+            handle(line: line)
+        }
+    }
+
+    /// Lines look like `{"type":"data","diff":true,"payload":{…}}`; diffs only carry changed keys,
+    /// with `null` for keys that went away.
+    private func handle(line: Data) {
+        guard let message = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              let payload = message["payload"] as? [String: Any] else { return }
+        let isDiff = message["diff"] as? Bool ?? false
+        if !isDiff {
+            info = [:]
+            artwork = nil
+        }
+        for (key, value) in payload {
+            if key == "artworkData" {
+                artwork = (value as? String).flatMap { Data(base64Encoded: $0) }
+                artworkGeneration += 1
+            } else if value is NSNull {
+                info[key] = nil
+            } else {
+                info[key] = value
+            }
+        }
+
+        let playing = info["playing"] as? Bool ?? false
+        let title = info["title"] as? String ?? ""
+        guard !title.isEmpty else {
+            publish(status: "Nothing playing")
+            return
+        }
+        let app = appName(info["bundleIdentifier"] as? String)
+        status = "\(playing ? "Playing" : "Paused") in \(app)"
+        onChange?(NowPlaying(
+            isPlaying: playing,
+            title: title,
+            artist: info["artist"] as? String ?? "",
+            artworkKey: artwork == nil ? nil : "mediaremote-\(artworkGeneration)"
+        ))
+    }
+
+    private func publish(status: String) {
+        self.status = status
+        onChange?(NowPlaying())
+    }
+
+    private func appName(_ bundleID: String?) -> String {
+        guard let bundleID else { return "an unknown app" }
+        if let name = appNames[bundleID] { return name }
+        let name = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+            .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? bundleID
+        appNames[bundleID] = name
+        return name
+    }
+}

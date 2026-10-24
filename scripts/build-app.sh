@@ -13,9 +13,21 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$(swift build -c release --show-bin-path)/BKLight" "$APP/Contents/MacOS/BKLight"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+
+# MediaRemote adapter ("anything playing on this Mac"): Perl loads this library, see ThirdParty/.
+MRA=ThirdParty/mediaremote-adapter
+FRAMEWORK="$APP/Contents/Resources/MediaRemoteAdapter.framework"
+mkdir -p "$FRAMEWORK"
+clang -dynamiclib -fobjc-arc -fvisibility=default -O2 -arch arm64 -arch x86_64 -mmacosx-version-min=14.0 \
+    -I "$MRA/include" -I "$MRA/src" \
+    -framework Foundation -framework AppKit -framework UniformTypeIdentifiers \
+    -install_name @rpath/MediaRemoteAdapter.framework/MediaRemoteAdapter \
+    -o "$FRAMEWORK/MediaRemoteAdapter" "$MRA"/src/adapter/*.m "$MRA"/src/private/*.m "$MRA"/src/utility/*.m
+cp "$MRA/bin/mediaremote-adapter.pl" "$APP/Contents/Resources/"
 # Matched by SHA-1 rather than name, which can contain non-ASCII characters.
 IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/"Apple Development: / { print $2; exit }')}"
 IDENTITY="${IDENTITY:--}"
+codesign --force --sign "$IDENTITY" "$FRAMEWORK/MediaRemoteAdapter"
 codesign --force --sign "$IDENTITY" "$APP"
 echo "Built $APP (signed with: $IDENTITY)"
 if [ "${1:-}" = "--install" ]; then
