@@ -67,6 +67,21 @@ struct DisplaySection: View {
             Picker("Mode", selection: $controller.settings.mode) {
                 ForEach(DisplayMode.allCases) { Text($0.label).tag($0) }
             }
+            if controller.settings.mode == .ambilight {
+                Picker("Screen style", selection: $controller.settings.screenStyle) {
+                    ForEach(ScreenStyle.allCases) { Text($0.label).tag($0) }
+                }
+                Text(controller.screenStatus).font(.caption).foregroundStyle(controller.screenFailed ? .red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if controller.screenFailed {
+                    HStack {
+                        Button("Open Privacy Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+                        }
+                        Button("Retry") { controller.retryScreenCapture() }
+                    }
+                }
+            }
             Picker("Layout", selection: $controller.settings.layout) {
                 ForEach(Layout.allCases) { Text($0.label).tag($0) }
             }

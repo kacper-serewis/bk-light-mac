@@ -18,7 +18,7 @@ swift test                      # protocol / rotation / clock tests
 
 The app is signed with the first "Apple Development" identity in the keychain (`SIGN_IDENTITY=…`
 picks another, `SIGN_IDENTITY=-` signs ad-hoc). A real identity keeps macOS permissions (Bluetooth,
-Automation) across rebuilds; ad-hoc builds lose them every time.
+Screen Recording, Automation) across rebuilds; ad-hoc builds lose them every time.
 
 ## Setup
 
@@ -42,6 +42,9 @@ Automation) across rebuilds; ad-hoc builds lose them every time.
   every panel with the "Same image" layout).
 - Paused or stopped (after a grace period, 4 s by default) → the Minecraft clock: 64 frames a day,
   noon = frame 0. It dims at night (15 %) and peaks at 15:00.
+- **Screen colours (ambilight)** captures the main display (Screen Recording permission) as a soft
+  glow of averaged colours or as a mini mirror of the screen, 10 times a second at most; nearly
+  identical frames are skipped.
 - Frames are only sent when the picture changes. Each panel uploads its newest tile on its own; after
   the frame ack it waits up to 250 ms for the panels uploading the same frame, so they validate
   (show it) together. Waiting longer makes a panel drop the frame (`05 00 01 80 03`) and ignore the

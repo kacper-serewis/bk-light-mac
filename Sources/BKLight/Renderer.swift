@@ -35,6 +35,16 @@ enum Renderer {
         Bitmap(drawing: image, width: size, height: size, smooth: true)
     }
 
+    /// Ambilight: either a few averaged screen regions blown up into soft gradients, or the screen itself.
+    static func screen(_ capture: Bitmap, style: ScreenStyle, size: Int) -> Bitmap {
+        switch style {
+        case .glow:
+            capture.averaged(width: 6, height: 6).saturated(by: 1.4).resizedBilinear(width: size, height: size)
+        case .mirror:
+            capture.cgImage().map { Bitmap(drawing: $0, width: size, height: size, smooth: true) } ?? Bitmap(width: size, height: size)
+        }
+    }
+
     /// Big slot numbers on coloured quadrants with a white bar along the top edge,
     /// so you can see whether each panel sits in the right place and the right way up.
     static func identifyPattern(size: Int, tiled: Bool) -> Bitmap {
