@@ -1,5 +1,8 @@
 import CoreBluetooth
 import Foundation
+import os
+
+private let log = Logger(subsystem: "nl.serewis.bklight", category: "panel")
 
 enum PanelError: LocalizedError {
     case notReady
@@ -15,8 +18,8 @@ enum PanelError: LocalizedError {
     }
 }
 
-/// One BLE connection to one LED panel. Frames are coalesced: only the newest
-/// pending image is sent, and the last delivered image is re-sent after a reconnect.
+/// One BLE connection to one LED panel. Sending is split in two (upload, then commit) so
+/// `FrameSender` can make all panels show a new frame at the same moment.
 @MainActor
 final class PanelLink: NSObject, ObservableObject, Identifiable {
     enum State: String {
@@ -33,9 +36,7 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
     private var writeChar: CBCharacteristic?
     private var notifyChar: CBCharacteristic?
 
-    private var pendingPNG: Data?
-    private var lastDeliveredPNG: Data?
-    private var sendLoop: Task<Void, Never>?
+    private var consecutiveFailures = 0
 
     private var receivedAcks: [Data] = []
     private var ackWaiter: (matches: [Data], continuation: CheckedContinuation<Void, Error>)?
@@ -43,6 +44,8 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
 
     /// Called when a send keeps failing so the manager can drop and re-establish the link.
     var onNeedsReconnect: ((PanelLink) -> Void)?
+    /// Called whenever the link becomes able to take frames (first connect and every reconnect).
+    var onReady: ((PanelLink) -> Void)?
 
     init(peripheral: CBPeripheral) {
         self.id = peripheral.identifier
@@ -85,55 +88,49 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
 
     // MARK: Sending
 
-    func submit(png: Data) {
-        pendingPNG = png
-        pumpIfPossible()
-    }
-
-    private func pumpIfPossible() {
-        guard sendLoop == nil, state == .ready, pendingPNG != nil else { return }
-        sendLoop = Task { [weak self] in
-            await self?.runSendLoop()
-        }
-    }
-
-    private func runSendLoop() async {
-        defer {
-            sendLoop = nil
+    /// Handshake and frame upload, up to the panel's frame ack. The panel gets the picture
+    /// but `commit()` still has to follow.
+    func upload(png: Data) async throws {
+        guard state == .ready else { throw PanelError.notReady }
+        state = .sending
+        let started = ContinuousClock.now
+        do {
+            try await deliver(png: png)
+            consecutiveFailures = 0
+            log.debug("\(self.peripheral.name ?? "?", privacy: .public) upload \(png.count) B in \(started.duration(to: .now), privacy: .public)")
+        } catch {
+            log.error("\(self.peripheral.name ?? "?", privacy: .public) upload failed after \(started.duration(to: .now), privacy: .public): \(error.localizedDescription, privacy: .public)")
             if state == .sending { state = .ready }
-        }
-        var failures = 0
-        while let png = pendingPNG, state.isUsable {
-            pendingPNG = nil
-            state = .sending
-            do {
-                try await deliver(png: png)
-                lastDeliveredPNG = png
-                framesSent += 1
-                lastError = nil
-                failures = 0
-            } catch {
-                lastError = error.localizedDescription
-                failures += 1
-                // Keep the frame unless something newer arrived meanwhile.
-                if pendingPNG == nil { pendingPNG = png }
-                if failures >= 3 {
-                    onNeedsReconnect?(self)
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(300))
+            lastError = error.localizedDescription
+            consecutiveFailures += 1
+            if consecutiveFailures >= 3 {
+                consecutiveFailures = 0
+                onNeedsReconnect?(self)
             }
+            throw error
         }
     }
 
-    /// handshake → ack, frame (write-with-response) → ack, validation. Same as send_frame() in Python.
+    /// Sends the validation that completes an upload. Returns false if the link dropped meanwhile.
+    func commit() -> Bool {
+        guard let writeChar, state == .sending else { return false }
+        peripheral.writeValue(PanelProtocol.frameValidation, for: writeChar, type: .withoutResponse)
+        state = .ready
+        framesSent += 1
+        lastError = nil
+        return true
+    }
+
+    /// handshake → ack, frame (write-with-response) → ack. Same as send_frame() in Python, minus the validation.
     private func deliver(png: Data) async throws {
-        guard let writeChar, state.isUsable else { throw PanelError.notReady }
+        guard let writeChar else { throw PanelError.notReady }
         let frame = PanelProtocol.buildFrame(png: png)
 
         receivedAcks.removeAll()
         peripheral.writeValue(PanelProtocol.handshakeFirst, for: writeChar, type: .withoutResponse)
-        try await waitForAck(PanelProtocol.ackStageOne, label: "handshake ack")
+        // Handshake acks normally arrive within ~300 ms; a panel that dropped the previous
+        // transaction never acks, so give up quickly and retry.
+        try await waitForAck(PanelProtocol.ackStageOne, label: "handshake ack", timeout: 1.5)
         try await Task.sleep(for: .milliseconds(100))
 
         receivedAcks.removeAll()
@@ -147,8 +144,6 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
             offset = end
         }
         try await waitForAck(PanelProtocol.ackFrame, label: "frame ack")
-        try await Task.sleep(for: .milliseconds(100))
-        peripheral.writeValue(PanelProtocol.frameValidation, for: writeChar, type: .withoutResponse)
     }
 
     private func writeWithResponse(_ data: Data, to characteristic: CBCharacteristic) async throws {
@@ -163,11 +158,11 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
         }
     }
 
-    private func waitForAck(_ matches: [Data], label: String) async throws {
+    private func waitForAck(_ matches: [Data], label: String, timeout: Double = 5) async throws {
         if receivedAcks.contains(where: matches.contains) { return }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             ackWaiter = (matches, continuation)
-            scheduleTimeout(seconds: 5) { [weak self] in
+            scheduleTimeout(seconds: timeout) { [weak self] in
                 guard let self, let waiter = self.ackWaiter else { return }
                 self.ackWaiter = nil
                 waiter.continuation.resume(throwing: PanelError.timeout(label))
@@ -194,6 +189,7 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
     }
 
     private func handleNotification(_ value: Data) {
+        log.debug("\(self.peripheral.name ?? "?", privacy: .public) notify \(value.hex, privacy: .public)")
         receivedAcks.append(value)
         if let waiter = ackWaiter, waiter.matches.contains(value) {
             ackWaiter = nil
@@ -204,8 +200,7 @@ final class PanelLink: NSObject, ObservableObject, Identifiable {
 
     private func becameReady() {
         state = .ready
-        if pendingPNG == nil { pendingPNG = lastDeliveredPNG }
-        pumpIfPossible()
+        onReady?(self)
     }
 }
 

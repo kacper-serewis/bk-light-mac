@@ -16,6 +16,10 @@ Protocol and clock logic are ported from `bk-light-app` (Tauri) and
 swift test                      # protocol / rotation / clock tests
 ```
 
+The app is signed with the first "Apple Development" identity in the keychain (`SIGN_IDENTITY=…`
+picks another, `SIGN_IDENTITY=-` signs ad-hoc). A real identity keeps macOS permissions (Bluetooth,
+Automation) across rebuilds; ad-hoc builds lose them every time.
+
 ## Setup
 
 1. **Scan**, then use **Assign** to put each panel in its slot (top left, top right, …).
@@ -38,8 +42,13 @@ swift test                      # protocol / rotation / clock tests
   every panel with the "Same image" layout).
 - Paused or stopped (after a grace period, 4 s by default) → the Minecraft clock: 64 frames a day,
   noon = frame 0. It dims at night (15 %) and peaks at 15:00.
-- Frames are only sent when the picture changes. Each panel sends only its newest frame and resends
-  it after reconnecting. Panels reconnect on their own when they come back on.
+- Frames are only sent when the picture changes. Each panel uploads its newest tile on its own; after
+  the frame ack it waits up to 250 ms for the panels uploading the same frame, so they validate
+  (show it) together. Waiting longer makes a panel drop the frame (`05 00 01 80 03`) and ignore the
+  next handshake. Newer frames replace ones still waiting.
+- A panel gets the current picture again after reconnecting, and panels reconnect on their own when
+  they come back on.
 - Per frame: handshake → ack `0C 00 01 80 81…`, framed PNG (write-with-response) → ack `05 00 02 00 03`,
   then validation `05 00 00 01 00`. Frames over the 512-byte ATT limit (cover tiles are ~3 KB) are
   written in sequential 512-byte chunks.
+- Debug logging: `log stream --level debug --predicate 'subsystem == "nl.serewis.bklight"'`.
