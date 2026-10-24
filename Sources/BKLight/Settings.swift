@@ -39,15 +39,22 @@ enum MediaSource: String, Codable, CaseIterable, Identifiable {
 }
 
 enum DisplayMode: String, Codable, CaseIterable, Identifiable {
-    case auto, clockOnly, off
+    case auto, clockOnly, ambilight, off
     var id: String { rawValue }
     var label: String {
         switch self {
         case .auto: "Cover art, clock when idle"
         case .clockOnly: "Clock only"
+        case .ambilight: "Screen colours (ambilight)"
         case .off: "Off (black)"
         }
     }
+}
+
+enum ScreenStyle: String, Codable, CaseIterable, Identifiable {
+    case glow, mirror
+    var id: String { rawValue }
+    var label: String { self == .glow ? "Soft glow (average colours)" : "Mirror (mini screen)" }
 }
 
 struct AppSettings: Codable, Equatable {
@@ -61,6 +68,7 @@ struct AppSettings: Codable, Equatable {
     var haEntityID = "media_player.spotify"
     /// Seconds to keep the cover after playback stops, so skipping tracks doesn't flash the clock.
     var idleGrace: Double = 4
+    var screenStyle: ScreenStyle = .glow
 
     private static let key = "settings.v1"
 
@@ -77,6 +85,27 @@ struct AppSettings: Codable, Equatable {
     }
 
     func panel(in slot: Slot) -> PanelConfig? { panels.first { $0.slot == slot } }
+}
+
+extension AppSettings {
+    /// Decodes key by key so settings saved by an older version (without newer keys) keep their values.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            (try? container.decodeIfPresent(T.self, forKey: key)) ?? fallback
+        }
+        let defaults = AppSettings()
+        panels = value(.panels, defaults.panels)
+        layout = value(.layout, defaults.layout)
+        source = value(.source, defaults.source)
+        mode = value(.mode, defaults.mode)
+        brightness = value(.brightness, defaults.brightness)
+        dynamicBrightness = value(.dynamicBrightness, defaults.dynamicBrightness)
+        haBaseURL = value(.haBaseURL, defaults.haBaseURL)
+        haEntityID = value(.haEntityID, defaults.haEntityID)
+        idleGrace = value(.idleGrace, defaults.idleGrace)
+        screenStyle = value(.screenStyle, defaults.screenStyle)
+    }
 }
 
 /// Home Assistant token lives in the login keychain rather than UserDefaults.

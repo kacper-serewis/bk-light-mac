@@ -2,17 +2,18 @@ import AppKit
 import Combine
 import Foundation
 
-/// Decides what the wall shows (cover art vs. Minecraft clock), renders it and
+/// Decides what the wall shows (cover art, Minecraft clock or screen colours), renders it and
 /// pushes one tile to each panel whenever the picture actually changes.
 @MainActor
 final class DisplayController: ObservableObject {
     enum Content: Equatable {
-        case none, clock(Int), cover(String), identify
+        case none, clock(Int), cover(String), screen(Int), identify
         var label: String {
             switch self {
             case .none: "Nothing"
             case .clock(let index): "Minecraft clock (frame \(index + 1)/64)"
             case .cover: "Album cover"
+            case .screen: "Screen colours"
             case .identify: "Identify pattern"
             }
         }
@@ -22,6 +23,7 @@ final class DisplayController: ObservableObject {
         didSet {
             guard settings != oldValue else { return }
             settings.save()
+            if settings.mode != oldValue.mode { updateScreenCapture() }
             if settings.panels != oldValue.panels { bluetooth.sync(wanted: Set(settings.panels.map(\.id))) }
             if settings.source != oldValue.source || settings.haBaseURL != oldValue.haBaseURL
                 || settings.haEntityID != oldValue.haEntityID {
@@ -43,9 +45,12 @@ final class DisplayController: ObservableObject {
     @Published private(set) var content: Content = .none
     @Published private(set) var preview: NSImage?
     @Published private(set) var appliedBrightness = 1.0
+    @Published private(set) var screenStatus = ""
+    @Published private(set) var screenFailed = false
 
     let bluetooth = BluetoothManager()
     private lazy var sender = FrameSender(bluetooth: bluetooth)
+    private let screen = ScreenCapture()
 
     private var source: NowPlayingSource?
     private var coverCache: (key: String, image: CGImage)?
@@ -63,6 +68,13 @@ final class DisplayController: ObservableObject {
         bluetooth.onLinksChanged = { [weak self] in self?.render(force: true) }
         bluetooth.sync(wanted: Set(settings.panels.map(\.id)))
         restartSource()
+        screen.onChange = { [weak self] in
+            guard let self else { return }
+            if self.screenStatus != self.screen.status { self.screenStatus = self.screen.status }
+            if self.screenFailed != self.screen.failed { self.screenFailed = self.screen.failed }
+            self.render(force: false)
+        }
+        updateScreenCapture()
         tick = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.render(force: false) }
         }
@@ -89,6 +101,14 @@ final class DisplayController: ObservableObject {
     func identify() {
         identifyUntil = Date().addingTimeInterval(8)
         render(force: true)
+    }
+
+    func retryScreenCapture() {
+        screen.restart()
+    }
+
+    private func updateScreenCapture() {
+        if settings.mode == .ambilight { screen.start() } else { screen.stop() }
     }
 
     // MARK: Source
@@ -133,6 +153,7 @@ final class DisplayController: ObservableObject {
         switch settings.mode {
         case .off: return .none
         case .clockOnly: return .clock(Renderer.clockIndex(for: now))
+        case .ambilight: return .screen(screen.generation)
         case .auto:
             let recentlyPlaying = nowPlaying.isPlaying || now.timeIntervalSince(lastPlayingAt) < settings.idleGrace
             if recentlyPlaying, let key = nowPlaying.artworkKey, !key.isEmpty {
@@ -155,7 +176,7 @@ final class DisplayController: ObservableObject {
         brightness = min(1, max(0.02, brightness))
         let size = settings.layout == .tiled ? PanelProtocol.tileSize * 2 : PanelProtocol.tileSize
 
-        let key = "\(next)|\(Int(brightness * 50))|\(settings.layout)|\(settings.panels.map { "\($0.id)\($0.slot)\($0.rotation)" })"
+        let key = "\(next)|\(Int(brightness * 50))|\(settings.layout)|\(settings.screenStyle)|\(settings.panels.map { "\($0.id)\($0.slot)\($0.rotation)" })"
         guard force || key != lastRenderKey else { return }
         lastRenderKey = key
 
@@ -164,6 +185,8 @@ final class DisplayController: ObservableObject {
         case .none: canvas = Bitmap(width: size, height: size)
         case .clock(let index): canvas = Renderer.clock(index: index, size: size)
         case .cover: canvas = coverCache.map { Renderer.cover($0.image, size: size) } ?? Bitmap(width: size, height: size)
+        case .screen:
+            canvas = screen.frame.map { Renderer.screen($0, style: settings.screenStyle, size: size) } ?? Bitmap(width: size, height: size)
         case .identify: canvas = Renderer.identifyPattern(size: size, tiled: settings.layout == .tiled)
         }
 
