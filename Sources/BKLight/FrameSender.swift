@@ -25,6 +25,9 @@ final class FrameSender {
         bluetooth.onLinkReady = { [weak self] id in self?.linkBecameReady(id) }
     }
 
+    /// True when no panel is uploading or about to.
+    var isIdle: Bool { loops.isEmpty }
+
     func submit(_ tiles: [UUID: Data]) {
         generation += 1
         for (id, png) in tiles where latest[id]?.png != png {

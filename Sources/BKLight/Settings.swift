@@ -33,22 +33,75 @@ enum Layout: String, Codable, CaseIterable, Identifiable {
 }
 
 enum MediaSource: String, Codable, CaseIterable, Identifiable {
-    case spotifyApp, homeAssistant
-    var id: String { rawValue }
-    var label: String { self == .spotifyApp ? "Spotify app on this Mac" : "Home Assistant media player" }
-}
-
-enum DisplayMode: String, Codable, CaseIterable, Identifiable {
-    case auto, clockOnly, ambilight, off
+    case system, spotifyApp, homeAssistant
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .auto: "Cover art, clock when idle"
-        case .clockOnly: "Clock only"
+        case .system: "Anything playing on this Mac"
+        case .spotifyApp: "Spotify app (AppleScript)"
+        case .homeAssistant: "Home Assistant media player"
+        }
+    }
+}
+
+enum DisplayMode: String, Codable, CaseIterable, Identifiable {
+    case auto, clockOnly, ambilight, weather, system, home, life, off
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .auto: "Automatic (rules)"
+        case .clockOnly: "Clock"
         case .ambilight: "Screen colours (ambilight)"
+        case .weather: "Weather"
+        case .system: "System status"
+        case .home: "Home (Home Assistant)"
+        case .life: "Game of Life"
         case .off: "Off (black)"
         }
     }
+}
+
+/// In automatic mode: shown only while they have something to show, first match wins.
+enum ActiveSource: String, Codable, CaseIterable, Identifiable {
+    case music, screen, printer, laundry, bins
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .music: "Music (cover art while playing)"
+        case .screen: "Screen colours (while you use the Mac)"
+        case .printer: "3D printer (while printing)"
+        case .laundry: "Washing machine (running, then done)"
+        case .bins: "Bins (evening before pickup)"
+        }
+    }
+    var usesHomeAssistant: Bool { self == .printer || self == .laundry || self == .bins }
+}
+
+/// In automatic mode: shown in turns when no active source applies.
+enum IdleScreen: String, Codable, CaseIterable, Identifiable {
+    case clock, weather, system, home, life
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .clock: "Clock"
+        case .weather: "Weather"
+        case .system: "System status"
+        case .home: "Home: power, temperature (Home Assistant)"
+        case .life: "Game of Life"
+        }
+    }
+}
+
+enum AwayAction: String, Codable, CaseIterable, Identifiable {
+    case off, keep
+    var id: String { rawValue }
+    var label: String { self == .off ? "Turn the wall off" : "Keep showing music and idle screens" }
+}
+
+enum NightAction: String, Codable, CaseIterable, Identifiable {
+    case off, clock
+    var id: String { rawValue }
+    var label: String { self == .off ? "Wall off" : "Clock only" }
 }
 
 enum ScreenStyle: String, Codable, CaseIterable, Identifiable {
@@ -60,7 +113,7 @@ enum ScreenStyle: String, Codable, CaseIterable, Identifiable {
 struct AppSettings: Codable, Equatable {
     var panels: [PanelConfig] = []
     var layout: Layout = .tiled
-    var source: MediaSource = .spotifyApp
+    var source: MediaSource = .system
     var mode: DisplayMode = .auto
     var brightness: Double = 0.85
     var dynamicBrightness = true
@@ -69,6 +122,19 @@ struct AppSettings: Codable, Equatable {
     /// Seconds to keep the cover after playback stops, so skipping tracks doesn't flash the clock.
     var idleGrace: Double = 4
     var screenStyle: ScreenStyle = .glow
+
+    var activeOrder: [ActiveSource] = ActiveSource.allCases
+    var activeEnabled: Set<ActiveSource> = [.music]
+    var idleScreens: Set<IdleScreen> = [.clock]
+    /// Seconds per idle screen when several are enabled.
+    var idleRotation: Double = 20
+    /// Locked, display asleep, screensaver or system sleep.
+    var awayAction: AwayAction = .off
+    var nightEnabled = false
+    var nightStart = 0          // minutes after midnight
+    var nightEnd = 7 * 60
+    var nightAction: NightAction = .off
+    var weatherPlace: WeatherPlace?
 
     private static let key = "settings.v1"
 
@@ -85,6 +151,15 @@ struct AppSettings: Codable, Equatable {
     }
 
     func panel(in slot: Slot) -> PanelConfig? { panels.first { $0.slot == slot } }
+
+    func isNight(at date: Date, calendar: Calendar = .current) -> Bool {
+        guard nightEnabled, nightStart != nightEnd else { return false }
+        let parts = calendar.dateComponents([.hour, .minute], from: date)
+        let minutes = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        return nightStart < nightEnd
+            ? (nightStart..<nightEnd).contains(minutes)
+            : minutes >= nightStart || minutes < nightEnd
+    }
 }
 
 extension AppSettings {
@@ -105,6 +180,19 @@ extension AppSettings {
         haEntityID = value(.haEntityID, defaults.haEntityID)
         idleGrace = value(.idleGrace, defaults.idleGrace)
         screenStyle = value(.screenStyle, defaults.screenStyle)
+        // Keep every source exactly once, so newly added ones show up in the list.
+        let order = value(.activeOrder, defaults.activeOrder)
+        activeOrder = order.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+            + ActiveSource.allCases.filter { !order.contains($0) }
+        activeEnabled = value(.activeEnabled, defaults.activeEnabled)
+        idleScreens = value(.idleScreens, defaults.idleScreens)
+        idleRotation = value(.idleRotation, defaults.idleRotation)
+        awayAction = value(.awayAction, defaults.awayAction)
+        nightEnabled = value(.nightEnabled, defaults.nightEnabled)
+        nightStart = value(.nightStart, defaults.nightStart)
+        nightEnd = value(.nightEnd, defaults.nightEnd)
+        nightAction = value(.nightAction, defaults.nightAction)
+        weatherPlace = value(.weatherPlace, defaults.weatherPlace)
     }
 }
 
